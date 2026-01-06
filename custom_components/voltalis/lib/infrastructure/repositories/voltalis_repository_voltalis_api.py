@@ -1,5 +1,7 @@
+import asyncio
 import logging
 from datetime import datetime
+from typing import cast
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -10,19 +12,24 @@ from custom_components.voltalis.lib.application.providers.http_client import (
 )
 from custom_components.voltalis.lib.application.repositories.voltalis_repository import VoltalisRepository
 from custom_components.voltalis.lib.domain.exceptions import VoltalisConnectionException, VoltalisValidationException
-from custom_components.voltalis.lib.domain.models.device import VoltalisDevice
+from custom_components.voltalis.lib.domain.models.device import VoltalisDevice, VoltalisDeviceProgTypeEnum
 from custom_components.voltalis.lib.domain.models.device_health import VoltalisDeviceHealth
 from custom_components.voltalis.lib.domain.models.energy_contract import VoltalisEnergyContract
 from custom_components.voltalis.lib.domain.models.manual_setting import (
     VoltalisManualSetting,
     VoltalisManualSettingUpdate,
 )
+from custom_components.voltalis.lib.domain.models.program import VoltalisProgram
 from custom_components.voltalis.lib.infrastructure.dtos.voltalis_device import VoltalisDeviceDto
 from custom_components.voltalis.lib.infrastructure.dtos.voltalis_device_consumption import VoltalisConsumptionDto
 from custom_components.voltalis.lib.infrastructure.dtos.voltalis_device_health import VoltalisDeviceHealthDto
 from custom_components.voltalis.lib.infrastructure.dtos.voltalis_manual_setting import (
     VoltalisManualSettingDto,
     VoltalisManualSettingUpdateDto,
+)
+from custom_components.voltalis.lib.infrastructure.dtos.voltalis_program import (
+    VoltalisProgramDto,
+    VoltalisProgramUpdateDto,
 )
 from custom_components.voltalis.lib.infrastructure.dtos.voltalis_realtime_consumption import (
     VoltalisRealtimeConsumptionDto,
@@ -103,7 +110,6 @@ class VoltalisRepositoryVoltalisApi(VoltalisRepository):
             self.__logger.error("Error parsing realtime consumption: %s", err)
             raise VoltalisValidationException(*err.args) from err
 
-        self.__logger.info(parsed_realtime_consumption.model_dump_json())
         live_consumption = sum(
             consumption_record.total_consumption_in_wh
             for consumption_record in parsed_realtime_consumption.consumptions
@@ -209,3 +215,71 @@ class VoltalisRepositoryVoltalisApi(VoltalisRepository):
 
         contracts = {contract.id: contract.to_voltalis_energy_contract() for contract in parsed_contracts}
         return contracts
+
+    async def get_programs(self) -> dict[int, VoltalisProgram]:
+        quick_programs_response: HttpClientResponse[list[dict]]
+        user_programs_response: HttpClientResponse[list[dict]]
+        try:
+            quick_programs_response, user_programs_response = cast(
+                tuple[HttpClientResponse[list[dict]], HttpClientResponse[list[dict]]],
+                await asyncio.gather(
+                    self._client.send_request(
+                        url="/api/site/{site_id}/quicksettings",
+                        method="GET",
+                    ),
+                    self._client.send_request(
+                        url="/api/site/{site_id}/programming/program",
+                        method="GET",
+                    ),
+                ),
+            )
+        except HttpClientException as err:
+            raise VoltalisConnectionException("Error connecting to Voltalis API") from err
+
+        parsed_quick_programs: list[VoltalisProgramDto]
+        parsed_user_programs: list[VoltalisProgramDto]
+        try:
+            parsed_quick_programs = TypeAdapter(list[VoltalisProgramDto]).validate_python(quick_programs_response.data)
+            parsed_user_programs = TypeAdapter(list[VoltalisProgramDto]).validate_python(user_programs_response.data)
+        except ValidationError as err:
+            self.__logger.error("Error parsing programs: %s", err)
+            raise VoltalisValidationException(*err.args) from err
+
+        # Set program
+        # /api/site/{{site_id}}/programming/program/{program_id}
+        # Set quick program
+        # /api/site/{{site_id}}/quicksettings/{program_id}/enable
+
+        return {
+            **{
+                program.id: program.to_voltalis_program(VoltalisDeviceProgTypeEnum.QUICK)
+                for program in parsed_quick_programs
+            },
+            **{
+                program.id: program.to_voltalis_program(VoltalisDeviceProgTypeEnum.USER)
+                for program in parsed_user_programs
+            },
+        }
+
+    async def toggle_program(self, program: VoltalisProgram) -> None:
+        url = (
+            f"/api/site/{{site_id}}/quicksettings/{program.id}/enable"
+            if program.type == VoltalisDeviceProgTypeEnum.QUICK
+            else f"/api/site/{{site_id}}/programming/program/{program.id}"
+        )
+
+        payload = VoltalisProgramUpdateDto(
+            name=program.name,
+            enabled=program.enabled,
+        ).model_dump(by_alias=True, exclude={"name"} if program.type == VoltalisDeviceProgTypeEnum.QUICK else None)
+
+        try:
+            await self._client.send_request(
+                url=url,
+                method="PUT",
+                body=payload,
+            )
+        except HttpClientException as err:
+            raise VoltalisConnectionException("Error connecting to Voltalis API") from err
+
+        self.__logger.info("Program %s updated to %s", program.id, program.enabled)
