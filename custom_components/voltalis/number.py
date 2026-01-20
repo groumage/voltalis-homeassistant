@@ -40,6 +40,7 @@ class VoltalisTokenLifetimeNumber(NumberEntity):
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "Token revocation",
             "manufacturer": "Voltalis",
+            "model": "Revoke Token Button",
         }
 
     @property

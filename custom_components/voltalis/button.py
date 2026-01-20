@@ -34,8 +34,9 @@ class VoltalisRevokeTokenButton(ButtonEntity):
         self._attr_unique_id = f"{entry.entry_id}_revoke_token"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": "Voltalis",
+            "name": "Token revocation",
             "manufacturer": "Voltalis",
+            "model": "Revoke Token Button",
         }
 
     async def async_press(self) -> None:
