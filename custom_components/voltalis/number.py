@@ -38,7 +38,7 @@ class VoltalisTokenLifetimeNumber(NumberEntity):
         self._attr_unique_id = f"{entry.entry_id}_token_lifetime"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": "Voltalis",
+            "name": "Token revocation",
             "manufacturer": "Voltalis",
         }
 
