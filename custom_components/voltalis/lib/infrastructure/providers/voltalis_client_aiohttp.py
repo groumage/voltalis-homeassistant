@@ -91,7 +91,6 @@ class VoltalisClientAiohttp(HttpClientAioHttp):
                 url=VoltalisClientAiohttp.LOGIN_ROUTE,
                 method="POST",
                 body=payload,
-                can_retry=False,
             )
             del username
             del password
