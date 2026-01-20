@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, TypedDict
 
 from aiohttp import ClientSession
@@ -25,9 +26,8 @@ class VoltalisClientAiohttp(HttpClientAioHttp):
     class Storage(TypedDict):
         """Dict that represent the storage of the client"""
 
-        username: str | None
-        password: str | None
         auth_token: str | None
+        token_created_at: datetime | None
         default_site_id: str | None
 
     def __init__(
@@ -40,11 +40,11 @@ class VoltalisClientAiohttp(HttpClientAioHttp):
 
         # Setup storage
         self.__storage = VoltalisClientAiohttp.Storage(
-            username=None,
-            password=None,
             auth_token=None,
+            token_created_at=None,
             default_site_id=None,
         )
+        self.__token_max_age_days: int | None = 7
 
         # Configure logger
         logger = logging.getLogger(__name__)
@@ -54,6 +54,25 @@ class VoltalisClientAiohttp(HttpClientAioHttp):
     def storage(self) -> "VoltalisClientAiohttp.Storage":
         """Get the aiohttp storage."""
         return self.__storage
+
+    def _is_token_expired(self) -> bool:
+        if self.__token_max_age_days is None:
+            return False
+        if self.__storage["token_created_at"] is None:
+            return True
+        
+        token_age = datetime.now(timezone.utc) - self.__storage["token_created_at"]
+        max_age = timedelta(days=self.__token_max_age_days)
+        
+        if token_age > max_age:
+            self.__logger.debug(
+                "Token age: %s days, max age: %s days",
+                token_age.days,
+                self.__token_max_age_days
+            )
+            return True
+        
+        return False
 
     async def get_access_token(
         self,
@@ -74,6 +93,8 @@ class VoltalisClientAiohttp(HttpClientAioHttp):
                 body=payload,
                 can_retry=False,
             )
+            del username
+            del password
             return response.data["token"]
         except HttpClientException as err:
             self.__logger.error("Error while getting access token: %s", err)
@@ -96,11 +117,12 @@ class VoltalisClientAiohttp(HttpClientAioHttp):
             username=username,
             password=password,
         )
-        # Store login data for refreshing token later (maybe hash credentials?)
-        self.__storage["username"] = username
-        self.__storage["password"] = password
+
+        del username
+        del password
 
         self.__storage["auth_token"] = token
+        self.__storage["token_created_at"] = datetime.now(timezone.utc)
         self.__storage["default_site_id"] = await self.__get_me()
 
         self.__logger.info("Voltalis login successful")
@@ -113,10 +135,8 @@ class VoltalisClientAiohttp(HttpClientAioHttp):
         await self.send_request(url="/auth/logout", method="DELETE")
         self.__logger.info("Logout successful")
 
-        self.__storage["username"] = None
-        self.__storage["password"] = None
-
         self.__storage["auth_token"] = None
+        self.__storage["token_created_at"] = None
         self.__storage["default_site_id"] = None
 
     async def send_request(
@@ -131,13 +151,17 @@ class VoltalisClientAiohttp(HttpClientAioHttp):
     ) -> HttpClientResponse[TData]:
         """Send http requests to Voltalis."""
 
-        can_retry = kwargs.pop("can_retry", True)
+        if self.__storage["auth_token"] is not None and url != VoltalisClientAiohttp.LOGIN_ROUTE:
+            if self._is_token_expired():
+                self.__logger.warning(
+                    "Token expired (age > %s days), forcing re-authentication",
+                    self.__token_max_age_days
+                )
+                self.__storage["auth_token"] = None
+                self.__storage["token_created_at"] = None
 
         if self.__storage["auth_token"] is None and url != VoltalisClientAiohttp.LOGIN_ROUTE:
-            await self.login(
-                username=self.__storage["username"] or "",
-                password=self.__storage["password"] or "",
-            )
+            raise VoltalisAuthenticationException("No authentication token available. Please login first.")
 
         headers = {
             **{
@@ -153,35 +177,13 @@ class VoltalisClientAiohttp(HttpClientAioHttp):
         if self.__storage["default_site_id"] is not None:
             _url = url.format(site_id=self.__storage["default_site_id"])
 
-        try:
-            response: HttpClientResponse[TData] = await super().send_request(
-                url=_url,
-                method=method,
-                body=body,
-                query_params=query_params,
-                headers=headers,
-                **kwargs,
-            )
-        except HttpClientException as ex:
-            if ex.response is None or ex.response.status != 401 or not can_retry:
-                raise ex
-
-            self.__logger.warning("Authentication failed (401), retrying with new login...")
-            try:
-                await self.login(
-                    username=self.__storage["username"] or "",
-                    password=self.__storage["password"] or "",
-                )
-            except Exception as login_ex:
-                self.__logger.error("Re-login failed during retry after 401: %s", login_ex)
-            response = await super().send_request(
-                url=_url,
-                method=method,
-                body=body,
-                query_params=query_params,
-                headers=headers,
-                can_retry=False,
-                **kwargs,
-            )
+        response: HttpClientResponse[TData] = await super().send_request(
+            url=_url,
+            method=method,
+            body=body,
+            query_params=query_params,
+            headers=headers,
+            **kwargs,
+        )
 
         return response
