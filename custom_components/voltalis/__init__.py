@@ -31,6 +31,8 @@ PLATFORMS = [
     Platform.SELECT,
     Platform.CLIMATE,
     Platform.WATER_HEATER,
+    Platform.NUMBER,
+    Platform.BUTTON,
 ]
 
 __all__ = ["CONFIG_SCHEMA"]
