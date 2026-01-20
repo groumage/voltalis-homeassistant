@@ -90,6 +90,10 @@ class HttpClientAioHttp(HttpClient):
 
         full_url = self._get_full_url(url)
         full_headers = headers or {}
+        
+        # Force SSL validation for HTTPS requests
+        kwargs.setdefault('ssl', True)
+        
         try:
             response = await self._session.request(
                 method=method,
